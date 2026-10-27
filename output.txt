@@ -1,0 +1,190 @@
+PS C:\Users\Administrator> Get-Content "C:\migrations\scripts\0-Check-MGN-Prerequisites\0-Prerequisites-checks.py" -TotalCount 100
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: Apache-2.0
+
+# Version: 1SEP2023.00
+
+from __future__ import print_function
+import sys
+import argparse
+import json
+import subprocess
+
+if not sys.warnoptions:
+    import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", category=Warning)
+    import paramiko
+import mfcommon
+import threading
+import os
+
+from queue import Queue
+
+MSG_SSH_SOURCE = 'SSH 22 to source server'
+MSG_SSH_UNABLE_TO_CONNECT = 'Unable to connect! SSH is null'
+MSG_SUDO_PERMISSION = 'SUDO permission'
+
+OUTPUT_ERROR_KEY = 'final_result'
+
+
+def is_winrm_accessible(s_result, winrm_use_ssl=False):
+    messages = []
+
+    command_wsman = "Test-WSMan -ComputerName " + s_result["server_name"]
+    if winrm_use_ssl:
+        command_wsman += " -UseSSL"
+
+    p_wsman = subprocess.Popen(["powershell.exe", command_wsman], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    for line in p_wsman.stdout.readlines():
+        messages.append(line)
+
+    for line in p_wsman.stderr.readlines():
+        messages.append(line)
+    retval = p_wsman.wait()
+    p_wsman.communicate()
+
+    for message in messages:
+        # Ignore certificate errors if present.
+        if 'unknown certificate authority' in str(message):
+            retval = 0
+
+    if retval != 0:
+        s_result['test_results'].append({'test': "WinRM Accessible", 'result': "Fail", 'error': messages})
+        s_result['success'] = False
+        return False
+    else:
+        s_result['test_results'].append({'test': "WinRM Accessible", 'result': "Pass"})
+        s_result['success'] = True
+        return True
+
+
+def check_windows(parameters):
+    mgn_endpoint = parameters["MGNEndpoint"]
+    s3_endpoint = parameters["S3Endpoint"]
+    s = parameters["s"]
+    mgn_server_ip = parameters["MGNServerIP"]
+    domain_user = parameters["user_name"]
+    domain_password = parameters["windows_password"]
+    secret_name = parameters["secret_name"]
+    no_user_prompts = parameters["no_user_prompts"]
+
+    windows_fail = False
+    print("")
+
+    s_result = {
+        "server_id": s["server_id"],
+        "server_name": s["server_fqdn"],
+        "test_results": [],
+        "success": True
+    }
+
+    if not is_winrm_accessible(s_result, parameters["winrm_use_ssl"]):
+        s_result['success'] = False
+        windows_fail = True
+        return s_result, windows_fail
+
+    credentials = mfcommon.get_server_credentials(
+        domain_user, domain_password, s, secret_name, no_user_prompts)
+
+    command = "Invoke-Command -ComputerName " + s["server_fqdn"] + \
+              " -FilePath 0-Prerequisites-Windows.ps1 -ArgumentList " + \
+              mgn_server_ip + "," + mgn_endpoint + "," + s3_endpoint
+    if credentials['username'] != "":
+        if "\\" not in credentials['username'] and "@" not in credentials['username']:
+            # Assume local account provided, prepend server name to user ID.
+            server_name_only = s["server_fqdn"].split(".")[0]
+            credentials['username'] = server_name_only + "\\" + credentials['username']
+            # logger.debug("INFO: Using local account to connect: " + credentials['username'])
+        else:
+            print("INFO: Using domain account to connect: " + credentials['username'])
+        command += " -Credential (New-Object System.Management.Automation.PSCredential('" + credentials[
+PS C:\Users\Administrator> Get-Content "C:\migrations\scripts\0-Check-MGN-Prerequisites\Package-Structure.yml"
+Name: "0-Check MGN Prerequisites"
+Description: "This script will verify the source servers meet the basic requirements for AWS MGN agent installation."
+MasterFileName: "0-Prerequisites-checks.py"
+UpdateUrl: ""
+Group: "Rehost-MGN"
+Arguments:
+  -
+    name: "ReplicationServerIP"
+    description: "Replication Server IP."
+    long_desc: "IP Address of an AWS MGN Replication EC2 Instance."
+    type: "standard"
+    required: true
+    group_order: "2"
+  -
+    name: "SecretWindows"
+    long_desc: "Windows Secret to use for credentials."
+    description: "Windows Secret"
+    type: "relationship"
+    rel_display_attribute: "Name"
+    rel_entity: "secret"
+    rel_key: "Name"
+    group_order: "4"
+  -
+    name: "SecretLinux"
+    long_desc: "Linux Secret to use for credentials."
+    description: "Linux Secret"
+    type: "relationship"
+    rel_display_attribute: "Name"
+    rel_entity: "secret"
+    rel_key: "Name"
+    group_order: "3"
+  -
+    name: "Waveid"
+    description: "Wave Name"
+    type: "relationship"
+    rel_display_attribute: "wave_name"
+    rel_entity: "wave"
+    rel_key: "wave_id"
+    validation_regex: "^(?!\\s*$).+"
+    validation_regex_msg: "Wave must be provided."
+    required: true
+    group_order: "1"
+  - name: "AppIds"
+    description: "Optional - Application Names"
+    listMultiSelect: true
+    type: "relationship"
+    rel_display_attribute: "app_name"
+    rel_entity: "application"
+    rel_key: "app_id"
+    validation_regex: "^(?!\\s*$).+"
+    validation_regex_msg: "Application must be provided."
+    source_filter_attribute_name: "script.script_arguments.Waveid"
+    rel_filter_attribute_name: "wave_ids"
+    required: false
+    group_order: "2"
+  - name: "ServerIds"
+    description: "Optional - Server Names"
+    listMultiSelect: true
+    type: "relationship"
+    rel_display_attribute: "server_name"
+    rel_entity: "server"
+    rel_key: "server_id"
+    validation_regex: "^(?!\\s*$).+"
+    validation_regex_msg: "Server must be provided."
+    source_filter_attribute_name: "script.script_arguments.AppIds"
+    rel_filter_attribute_name: "app_ids"
+    required: false
+    group_order: "3"
+  -
+    name: "S3Endpoint"
+    description: "Optional - S3 Endpoint"
+    long_desc: "S3 VPC Endpoint DNS name; used for private agent connectivity - see https://docs.aws.amazon.com/mgn/latest/ug/installing-agent-blocked.html"
+    type: "standard"
+    required: false
+    group_order: "5"
+  -
+    name: "MGNEndpoint"
+    description: "Optional - MGN Endpoint"
+    long_desc: "MGN VPC Endpoint DNS name; used for private agent connectivity - see https://docs.aws.amazon.com/mgn/latest/ug/installing-agent-blocked.html"
+    type: "standard"
+    required: false
+    group_order: "6"
+  - name: "UseSSL"
+    description: "Optional - Windows only - Force SSL for WinRM"
+    long_desc: "Force SSL to be used for all WinRM communication, SSL listeners need to be configure on each target server."
+    type: "checkbox"
+    group_order: "7"
+PS C:\Users\Administrator>
